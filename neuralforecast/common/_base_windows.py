@@ -476,9 +476,9 @@ class BaseWindows(BaseModel):
                 y=outsample_y, distr_args=distr_args, mask=outsample_mask
             )
         else:
-            output, _, _ = self._inv_normalization(
-                y_hat=output, temporal_cols=temporal_cols, y_idx=y_idx
-            )
+            # output, _, _ = self._inv_normalization(
+            #     y_hat=output, temporal_cols=temporal_cols, y_idx=y_idx
+            # )
             valid_loss = self.valid_loss(
                 y=outsample_y, y_hat=output, mask=outsample_mask
             )
@@ -514,7 +514,7 @@ class BaseWindows(BaseModel):
             (
                 insample_y,
                 insample_mask,
-                _,
+                outsample_y,
                 outsample_mask,
                 hist_exog,
                 futr_exog,
@@ -532,7 +532,7 @@ class BaseWindows(BaseModel):
             # Model Predictions
             output_batch = self(windows_batch)
             valid_loss_batch = self._compute_valid_loss(
-                outsample_y=original_outsample_y,
+                outsample_y=outsample_y,
                 output=output_batch,
                 outsample_mask=outsample_mask,
                 temporal_cols=batch["temporal_cols"],
