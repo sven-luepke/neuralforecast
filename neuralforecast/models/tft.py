@@ -4,6 +4,7 @@
 __all__ = ['TFT']
 
 # %% ../../nbs/models.tft.ipynb 5
+import math
 from typing import Tuple, Optional, Callable
 
 import torch
@@ -11,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import LayerNorm
+from torch.autograd import Variable
 import pandas as pd
 from ..losses.pytorch import MAE
 from ..common._base_windows import BaseWindows
@@ -296,11 +298,38 @@ class StaticCovariateEncoder(nn.Module):
         cs, ce, ch, cc = tuple(m(variable_ctx) for m in self.context_grns)  # type: ignore
 
         return cs, ce, ch, cc, sparse_weights  # type: ignore
+    
+    
+
+class PositionalEncoding(nn.Module):
+    """
+    Source: https://nlp.seas.harvard.edu/2018/04/03/attention.html#positional-encoding
+    """
+    def __init__(self, d_model, dropout, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) *
+                             -(math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+        
+    def forward(self, x):
+        x = x + Variable(self.pe[:, :x.size(1)], 
+                         requires_grad=False)
+        return self.dropout(x)
+
+
 
 # %% ../../nbs/models.tft.ipynb 21
 class TemporalCovariateEncoder(nn.Module):
     def __init__(
-        self, hidden_size, num_historic_vars, num_future_vars, dropout, grn_activation
+        self, hidden_size, num_historic_vars, num_future_vars, dropout, grn_activation, use_lstm,
     ):
         super(TemporalCovariateEncoder, self).__init__()
 
@@ -310,40 +339,47 @@ class TemporalCovariateEncoder(nn.Module):
             dropout=dropout,
             grn_activation=grn_activation,
         )
-        self.history_encoder = nn.LSTM(
-            input_size=hidden_size, hidden_size=hidden_size, batch_first=True
-        )
-
         self.future_vsn = VariableSelectionNetwork(
             hidden_size=hidden_size,
             num_inputs=num_future_vars,
             dropout=dropout,
             grn_activation=grn_activation,
         )
-        self.future_encoder = nn.LSTM(
-            input_size=hidden_size, hidden_size=hidden_size, batch_first=True
-        )
+        
+        self.use_lstm = use_lstm
+        if self.use_lstm:
+            self.history_encoder = nn.LSTM(
+                input_size=hidden_size, hidden_size=hidden_size, batch_first=True
+            )
+            self.future_encoder = nn.LSTM(
+                input_size=hidden_size, hidden_size=hidden_size, batch_first=True
+            )
 
-        # Shared Gated-Skip Connection
-        self.input_gate = GLU(hidden_size, hidden_size)
-        self.input_gate_ln = LayerNorm(hidden_size, eps=1e-3)
+            # Shared Gated-Skip Connection
+            self.input_gate = GLU(hidden_size, hidden_size)
+            self.input_gate_ln = LayerNorm(hidden_size, eps=1e-3)
+        else:
+            self.positional_encoding = PositionalEncoding(d_model=hidden_size, dropout=0)
 
     def forward(self, historical_inputs, future_inputs, cs, ch, cc):
         # [N,X_in,L] -> [N,hidden_size,L]
         historical_features, history_vsn_sparse_weights = self.history_vsn(
             historical_inputs, cs
         )
-        history, state = self.history_encoder(historical_features, (ch, cc))
-
         future_features, future_vsn_sparse_weights = self.future_vsn(future_inputs, cs)
-        future, _ = self.future_encoder(future_features, state)
         # torch.cuda.synchronize() # this call gives prf boost for unknown reasons
-
         input_embedding = torch.cat([historical_features, future_features], dim=1)
-        temporal_features = torch.cat([history, future], dim=1)
-        temporal_features = self.input_gate(temporal_features)
-        temporal_features = temporal_features + input_embedding
-        temporal_features = self.input_gate_ln(temporal_features)
+        
+        if self.use_lstm:
+            history, state = self.history_encoder(historical_features, (ch, cc))
+            future, _ = self.future_encoder(future_features, state)
+            temporal_features = torch.cat([history, future], dim=1)
+            temporal_features = self.input_gate(temporal_features)
+            temporal_features = temporal_features + input_embedding
+            temporal_features = self.input_gate_ln(temporal_features)
+        else:
+            temporal_features = self.positional_encoding(input_embedding)
+            
         return temporal_features, history_vsn_sparse_weights, future_vsn_sparse_weights
 
 # %% ../../nbs/models.tft.ipynb 23
@@ -439,6 +475,7 @@ class TFT(BaseWindows):
     `n_head`: int=4, number of attention heads in temporal fusion decoder.<br>
     `attn_dropout`: float (0, 1), dropout of fusion decoder's attention layer.<br>
     `grn_activation`: str, activation for the GRN module from ['ReLU', 'Softplus', 'Tanh', 'SELU', 'LeakyReLU', 'Sigmoid', 'ELU', 'GLU'].<br>
+    `use_lstm`: bool=True, if true, the model will use an LSTM to create temporal features instead of a fixed positional encoding<br>
     `loss`: PyTorch module, instantiated train loss class from [losses collection](https://nixtla.github.io/neuralforecast/losses.pytorch.html).<br>
     `valid_loss`: PyTorch module=`loss`, instantiated valid loss class from [losses collection](https://nixtla.github.io/neuralforecast/losses.pytorch.html).<br>
     `max_steps`: int=1000, maximum number of training steps.<br>
@@ -486,6 +523,7 @@ class TFT(BaseWindows):
         n_head: int = 4,
         attn_dropout: float = 0.0,
         grn_activation: str = "ELU",
+        use_lstm: bool = True,
         dropout: float = 0.1,
         loss=MAE(),
         valid_loss=None,
@@ -571,6 +609,7 @@ class TFT(BaseWindows):
             num_future_vars=futr_exog_size,
             dropout=dropout,
             grn_activation=self.grn_activation,
+            use_lstm=use_lstm,
         )
 
         # ------------------------------ Decoders -----------------------------#
