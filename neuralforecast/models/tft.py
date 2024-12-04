@@ -124,6 +124,10 @@ class TFTEmbedding(nn.Module):
             else:
                 setattr(self, attr + "_vectors", None)
                 setattr(self, attr + "_bias", None)
+                
+        ## TODO: clean this up
+        self.holiday_embedding = nn.Embedding(24, hidden_size)
+        self.weekday_embedding = nn.Linear(2, hidden_size)
 
     def _apply_embedding(
         self,
@@ -155,11 +159,19 @@ class TFTEmbedding(nn.Module):
             cont_emb=self.stat_exog_embedding_vectors,
             cont_bias=self.stat_exog_embedding_bias,
         )
-        k_inp = self._apply_embedding(
-            cont=futr_exog,
-            cont_emb=self.futr_exog_embedding_vectors,
-            cont_bias=self.futr_exog_embedding_bias,
-        )
+        #k_inp = self._apply_embedding(
+        #    cont=futr_exog,
+        #    cont_emb=self.futr_exog_embedding_vectors,
+        #    cont_bias=self.futr_exog_embedding_bias,
+        #)
+        # custom future covariate embedding
+        # TODO: extend this to arbitrary covariates
+        holiday_ids = futr_exog[:, :, 0].int()
+        holiday_emb = self.holiday_embedding(holiday_ids)
+        weekday_fourier = futr_exog[:, :, 1:]
+        weekday_emb = self.weekday_embedding(weekday_fourier)
+        k_inp = torch.stack([holiday_emb, weekday_emb], dim=-2)
+        
         o_inp = self._apply_embedding(
             cont=hist_exog,
             cont_emb=self.hist_exog_embedding_vectors,
@@ -583,6 +595,10 @@ class TFT(BaseWindows):
         self.interpretability_params = dict([])  # type: ignore
         self.tgt_size = tgt_size
         self.grn_activation = grn_activation
+        
+        # TODO: do not harcode this here
+        self.futr_exog_size = 2 # holiday ID and weekday
+        
         futr_exog_size = max(self.futr_exog_size, 1)
         num_historic_vars = futr_exog_size + self.hist_exog_size + tgt_size
 
@@ -614,7 +630,7 @@ class TFT(BaseWindows):
 
         # ------------------------------ Decoders -----------------------------#
         self.temporal_fusion_decoder = TemporalFusionDecoder(
-            n_head=n_head,
+           n_head=n_head,
             hidden_size=hidden_size,
             example_length=self.example_length,
             encoder_length=self.input_size,
@@ -730,7 +746,9 @@ class TFT(BaseWindows):
 
         # Historical feature importances
         hist_vsn_wgts = self.interpretability_params.get("history_vsn_wgts")
-        hist_exog_list = list(self.hist_exog_list) + list(self.futr_exog_list)
+        futr_exog_list = ["Holiday ID", "Weekday"]
+        #hist_exog_list = list(self.hist_exog_list) + list(self.futr_exog_list)
+        hist_exog_list = list(self.hist_exog_list) + futr_exog_list
         hist_exog_list += (
             [f"observed_target_{i+1}" for i in range(self.tgt_size)]
             if self.tgt_size > 1
@@ -749,7 +767,7 @@ class TFT(BaseWindows):
             future_vsn_wgts = self.interpretability_params.get("future_vsn_wgts")
             future_vsn_imp = pd.DataFrame(
                 self.mean_on_batch(future_vsn_wgts).cpu().numpy(),
-                columns=self.futr_exog_list,
+                columns=futr_exog_list,
             )
             importances["Future variable importance over time"] = future_vsn_imp
         #   importances["Future variable importance"] = future_vsn_imp.mean(axis=0).sort_values()
