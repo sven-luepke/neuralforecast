@@ -289,8 +289,8 @@ class BaseWindows(BaseModel):
         temporal_data_cols = self._get_temporal_exogenous_cols(
             temporal_cols=temporal_cols
         )
-        temporal_idxs = get_indexer_raise_missing(temporal_cols, temporal_data_cols)
-        temporal_idxs = np.append(y_idx, temporal_idxs)
+        #temporal_idxs = get_indexer_raise_missing(temporal_cols, temporal_data_cols)
+        temporal_idxs = [y_idx]
         temporal_data = temporal[:, :, temporal_idxs]
         temporal_mask = temporal[:, :, temporal_cols.get_loc("available_mask")].clone()
         if self.h > 0:
